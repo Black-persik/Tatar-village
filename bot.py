@@ -1,18 +1,24 @@
 import os
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from main import DatabaseManager
+from config import API_TOKEN, DATABASE_URL
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота
-API_TOKEN = '8257412493:AAHBybb-RUcPs85NP-c78aXpQU4Z0M0_P3w'
-
 # Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+
+# Инициализация базы данных
+db = DatabaseManager(DATABASE_URL)
 
 # Папки для медиа
 VOICES_DIR = "voices"
@@ -26,11 +32,20 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 # Обработчик команды /start
 @dp.message(Command("start"))
 async def send_welcome(message: types.Message):
-    await message.answer("Привет! Я бот с расширенными возможностями!\n"
+    user_id = message.from_user.id
+    user_name = message.from_user.full_name
+
+    # Проверяем или создаем пользователя
+    user = await db.get_user_by_telegram_id_async(user_id)
+    if not user:
+        await db.create_user_async(user_id, user_name)
+
+    await message.answer(f"Привет, {user_name}! Я бот с расширенными возможностями!\n"
                          "Доступные команды:\n"
                          "/voice - отправить голосовое сообщение\n"
                          "/image - отправить изображение\n"
-                         "/model - взаимодействие с ML моделью")
+                         "/model - взаимодействие с ML моделью\n"
+                         "/stats - моя статистика")
 
 
 # Отправка голосового сообщения
@@ -57,10 +72,23 @@ async def send_image(message: types.Message):
         logging.error(e)
 
 
+# Статистика пользователя
+@dp.message(Command("stats"))
+async def user_stats(message: types.Message):
+    user_id = message.from_user.id
+    stats = await db.get_user_stats_async(user_id)
+
+    if stats:
+        response = (f"📊 Ваша статистика:\n"
+                    f"Решено задач: {stats['total_solved']}\n"
+                    f"Общий счет: {stats['total_score']}")
+        await message.answer(response)
+    else:
+        await message.answer("Статистика не найдена")
+
+
 # Заглушка для ML модели
 async def process_with_model(text: str):
-    # Здесь будет интеграция с вашей ML моделью
-    # Пока возвращаем заглушку
     return f"Модель обработала текст: {text}"
 
 
@@ -88,6 +116,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())
