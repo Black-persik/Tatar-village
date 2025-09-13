@@ -13,6 +13,9 @@ async def get_user_by_telegram_id_async(telegram_id: int):
 async def get_user_stats_async(telegram_id: int):
     return await db.get_user_stats_async(telegram_id)
 
+async def increment_user_score_async(user_id: int, increment: int):
+    return await db.increment_user_score_async(user_id, increment)
+
 # Синхронные методы для использования вне асинхронного контекста
 def create_user(telegram_id: int, user_name: str, echpoch_score: int = 0):
     return db.create_user(telegram_id, user_name, echpoch_score)
