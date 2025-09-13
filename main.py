@@ -112,7 +112,6 @@ class DatabaseManager:
 
             conn.commit()
 
-    # Остальные методы класса остаются без изменений
     # User operations
     def create_user(self, telegram_id: int, user_name: str, echpoch_score: int = 0) -> int:
         with self._get_connection() as conn:
@@ -315,6 +314,9 @@ class DatabaseManager:
 
     async def get_user_stats_async(self, telegram_id: int) -> Optional[Dict[str, Any]]:
         return await asyncio.to_thread(self.get_user_stats, telegram_id)
+
+    async def increment_user_score_async(self, user_id: int, increment: int) -> bool:
+        return await asyncio.to_thread(self.increment_user_score, user_id, increment)
 
 
 if __name__ == "__main__":
