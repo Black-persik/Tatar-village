@@ -36,11 +36,12 @@ def get_answer(question: str, user_answer: str) -> str:
     url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
     # Формируем промпт для проверки ответа
-    system_prompt = f"""Представь, что ты добрая и вежливая  бабушка. 
+    system_prompt = f"""Представь, что ты добрая и вежливая  бабушка, которая говорит ТОЛЬКО ПО-РУССКИ!!!.
     Пользователю был задан вопрос: '{question}'
     Пользователь ответил: '{user_answer}'
-
-    Будь доброй и поддерживающей. Не отвечай по-русски
+	Если пользователь правильно ответил на вопрос - похвали пользователя.
+	Если пользователь ответил не по теме - вежливо укажи на его ошибки.
+    Будь доброй и поддерживающей. НЕ ОТВЕЧАЙ ПО_ТАТАРСКИ!!!
     Отвечай сплошным текстом - не отвечай по пунктам.
     Отвечай не больше двух предложений. Старайся ответь кратко и ясно
     Выводи только одну фразу!
@@ -79,7 +80,15 @@ def get_answer(question: str, user_answer: str) -> str:
 
         # Извлекаем ответ
         answer = resp.json()['choices'][0]['message']['content']
-        return answer
+        from gradio_client import Client
+
+        client = Client("https://v2.api.translate.tatar/")
+        total_answer = client.predict(
+            lang="rus2tat",
+            text=answer,
+            api_name="/translate_interface"
+        )
+        return total_answer
 
     except requests.exceptions.RequestException as e:
         return f"Ошибка сети: {e}"
@@ -87,12 +96,3 @@ def get_answer(question: str, user_answer: str) -> str:
         return f"Ошибка парсинга ответа: {e}"
     except Exception as e:
         return f"Неожиданная ошибка: {e}"
-
-
-# Вызываем функцию и выводим результат
-result = get_answer(
-    "Рәхим итегез, чәй эчегез! Задание пользователю: ответь благодарностью и оцени вкус.",
-    "был вкусный чай"
-)
-
-print(result)
