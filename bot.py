@@ -3,13 +3,17 @@ import logging
 import asyncio
 import random
 import requests
+import hashlib
+from functools import lru_cache
+from typing import Optional
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
-from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramNetworkError
 
 from main import DatabaseManager
 from config import API_TOKEN, DATABASE_URL
@@ -35,15 +39,51 @@ os.makedirs(VOICES_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 # Пути к изображениям
-WELCOME_IMAGE = os.path.join(IMAGES_DIR, "welcome.jpg")
-TEA_IMAGE = os.path.join(IMAGES_DIR, "tea.jpg")
-GAMES_IMAGE = os.path.join(IMAGES_DIR, "games.jpg")
-SLEEP_IMAGE = os.path.join(IMAGES_DIR, "sleep.jpg")
+WELCOME_IMAGE = os.path.join(IMAGES_DIR, "derevnya_vstuplenie_1.jpg")
+DVOR_IMAGE = os.path.join(IMAGES_DIR, "pa_and_ma_dvor.jpg")
+HOME_IMAGE = os.path.join(IMAGES_DIR, "home.jpg")
+DOM_VNUTRI_IMAGE = os.path.join(IMAGES_DIR, "pa_and_ma_dom_vnutri.jpg")
+BABULKA_IMAGE = os.path.join(IMAGES_DIR, "babulka.jpg")
+SLOVARIK_IMAGE = os.path.join(IMAGES_DIR, "slovarik.jpg")
+LIST_SLOV_IMAGE = os.path.join(IMAGES_DIR, "listslov.jpg")
+DED_IMAGE = os.path.join(IMAGES_DIR, "ded.jpg")
+DED_CHAK_IMAGE = os.path.join(IMAGES_DIR, "ded_chak.jpg")
+GRUSTNII_BABULUA_IMAGE = os.path.join(IMAGES_DIR, "grustnii_babulya.jpg")
+SAMOVAR_IMAGE = os.path.join(IMAGES_DIR, "samovar.jpg")
+DOBRII_IMAGE = os.path.join(IMAGES_DIR, "dobrii.jpg")
+FINAL_IMAGE = os.path.join(IMAGES_DIR, "final.jpg")
 
-# Проверяем существование изображений
-for img_path in [WELCOME_IMAGE, TEA_IMAGE, GAMES_IMAGE, SLEEP_IMAGE]:
+# Путь к голосовому сообщению
+VOICE_MESSAGE = os.path.join(VOICES_DIR, "golos.ogg")
+
+# Проверяем существование изображений и голосового сообщения
+for img_path in [WELCOME_IMAGE, DVOR_IMAGE, HOME_IMAGE, DOM_VNUTRI_IMAGE, BABULKA_IMAGE, SLOVARIK_IMAGE,
+                 LIST_SLOV_IMAGE, DED_IMAGE, DED_CHAK_IMAGE, GRUSTNII_BABULUA_IMAGE, SAMOVAR_IMAGE, DOBRII_IMAGE, FINAL_IMAGE]:
     if not os.path.exists(img_path):
         logger.warning(f"Изображение не найдено: {img_path}")
+
+if not os.path.exists(VOICE_MESSAGE):
+    logger.warning(f"Голосовое сообщение не найдено: {VOICE_MESSAGE}")
+
+
+# Функция для создания спойлера
+def create_spoiler(text: str) -> str:
+    """Создает текст со скрытым содержимым под спойлером"""
+    return f"<span class='tg-spoiler'>{text}</span>"
+
+
+# Кэширование изображений
+@lru_cache(maxsize=10)
+def get_cached_image(image_path: str) -> Optional[FSInputFile]:
+    """Кэширование изображений для ускорения доступа"""
+    if os.path.exists(image_path):
+        return FSInputFile(image_path)
+    return None
+
+
+def get_image_hash(image_path: str) -> str:
+    """Создание хэша для пути изображения"""
+    return hashlib.md5(image_path.encode()).hexdigest()
 
 
 # Состояния для FSM
@@ -52,210 +92,110 @@ class DayScenario(StatesGroup):
     waiting_phrase_response = State()
     waiting_for_answer = State()
     waiting_text_response = State()
+    waiting_tea_request = State()
 
-
-# Словарь для хранения всех словарей из всех глав
-FULL_DICTIONARY = {
-    "Приветствие": {
-        "рәхим ит(егез)": "добро пожаловать/угощайтесь (вежл. мн. ч.)",
-        "әйдә": "давай/прошу",
-        "менә": "вот/вот он",
-        "чәй": "чай",
-        "чәк-чәк": "чак-чак",
-        "белән": "с/со",
-        "утырыгыз": "садитесь (вежл.)",
-        "эчәрсезме? / эчегез": "будете пить? / пейте (вежл.)",
-        "тынч, матур": "спокойный, красивый",
-        "исәнме": "привет",
-        "кунак": "гость",
-        "авыл": "деревня",
-        "түр": "дом",
-        "уз": "проходи",
-        "кайнар": "горячий",
-        "кичләрен": "вечерами",
-        "җырлыйбыз": "поём"
-    },
-    "Еда": {
-        "кунак күңеле": "душа гостя",
-        "мәйдан": "площадь (здесь: широкий, желанный)",
-        "туйган көн": "день рождения",
-        "туйдырмыйча": "не накормив",
-        "җибәрмәсләр": "не отпустят",
-        "табын": "стол",
-        "милли пешерм": "национальная выпечка",
-        "өчпочмак": "эчпочмак (треугольник)",
-        "кыстыбый": "кыстыбый (лепешка с начинкой)",
-        "кәбәстә": "кабәртмә (жареный пирожок)",
-        "тәмле булсын": "приятного аппетита",
-        "аласызмы": "будете брать?",
-        "рәхмәт": "спасибо",
-        "тәмле": "вкусно",
-        "әйбәт": "хорошо",
-        "әле": "пожалуйста (мягкое)",
-        "коегыз": "наливайте",
-        "бераз": "немного",
-        "гына": "только",
-        "тагын": "еще",
-        "алырга": "брать",
-        "мөмкинме": "можно ли"
-    },
-    "Вечерние игры": {
-        "кич": "вечер",
-        "кояш байды": "солнце село",
-        "урам": "улица",
-        "чыгабыз": "выходим",
-        "күрше": "соседский",
-        "балалар": "дети",
-        "уйныйбыз": "играем",
-        "уеннар": "игры",
-        "уйнарсыңмы": "будешь играть"
-    },
-    "Завершение дня": {
-        "бүген": "сегодня",
-        "күңелле": "весело",
-        "киләсе тапкыр": "в следующий раз",
-        "килерсең": "приедешь",
-        "хәерле кич": "добрый вечер/спокойной ночи",
-        "төшкә чаклы": "до обеда",
-        "сау бул": "будь здоров",
-        "йокы": "сон",
-        "тәмле булсын": "пусть будет вкусным (сладким)"
-    }
-}
 
 # Объединенная глава со всеми заданиями
 CHAPTERS = {
     "chapter1": {
-        "title": "Глава 1: Полное погружение в татарскую культуру",
-        "character": "Әби һәм Бабай",
+        "title": "Глава 1",
         "parts": [
             {
-                "name": "Часть 1: Приветствие",
                 "type": "info",
-                "image": WELCOME_IMAGE,
-                "text_tatar": "Исәнме, кунак! Безнең авылга рәхим ит! Әйдә, түрдән уз. Менә кайнар чәй, чәк-чәк белән. Чәй эчәрсезме? Утырыгыз, рәхим итегез! Безнең авыл тыныч һәм матур. Кичләрен без җырлыйбыз.",
-                "text_russian": "Привет, гость! Добро пожаловать в нашу деревню! Проходи в дом. Вот горячий чай с чак-чаком. Будете чай? Присаживайтесь, угощайтесь! У нас в деревне спокойно и красиво. Вечерами мы поём песни.",
-                "explanation": "Татарское гостеприимство известно - всегда готовы принять гостей и угостить их лучшим, что есть в доме.",
-                "next_button_text": "📖 Посмотреть словарь",
+                "image": DVOR_IMAGE,
+                "text_tatar": "Әби (бабушка):\n\n— Исәнме, кунак! Безнең авылга рәхим ит!\n\n[Исэнme, куна́к! Безне́ng авылgá рэхи́m ит!]",
+                "text_russian": "Привет,"f"{create_spoiler('гость! Добро пожаловать в нашу деревню!')} \n\nБабай (дедушка):\n\n— Әйдә, түрдән уз. Сине кайнар чәй белән чәк-чәк көтә.\n\n[Эйдэ́, турдэ́n uz. Сине́ кайна́r чэй беле́n чэк-чэ́k кэtэ́.]\n\n Проходи {create_spoiler('в дом. Тебя ждёт горячий чай с чак-чаком.')}",
+                "next_button_text": "Зайти в дом",
+                "next_image": HOME_IMAGE,
+                "next_image1": DOM_VNUTRI_IMAGE,
+                "next_text_tatar": "Бабай:\n\n— Безнең авыл тыныч һәм матур. Кичләрен без җырлибыз.\n\n[Безнэ́ng авы́l тыны́ч хэm мату́r. Кичлэ́rэн без жyrла́йбыz.]",
+                "next_text_russian": f"У нас {create_spoiler('в деревне спокойно и красиво. Вечерами мы поём песни.')}",
+                "next_image2": BABULKA_IMAGE,
+                "next_text_babulka": f"Әби:\n\n — Утырыгыз, рәхим итегез! Чәй эчәрсезме?\n\n[Утырыгы́z, рэхи́m итеге́z! Чэй эчэрсезме́?]\n\nПрисаживайтесь, {create_spoiler('угощайтесь! Будете чай?')}",
+                "next_text_babulka1": f"— Ай ты наверное плохо меня понимаешь..\n\n *Әбика взяла с полки старенькую потрепанную книгу. \n\n — Вот возьми словарик:  ",
+                "next_image3": SLOVARIK_IMAGE,
+                "take_button_text": "Алу (взять)",
             },
             {
-                "name": "Часть 2: Задание 2.1",
-                "type": "multiple_choice",
-                "text_tatar": "",
-                "text_russian": "",
-                "explanation": "Выберите вежливую фразу-приглашение:",
-                "question": "Выберите вежливую фразу-приглашение:",
+                "type": "thanks_question",
+                "question": "Поблагодарите бабушку:",
                 "options": [
-                    {"text": "Рәхим итегез!", "correct": True,
-                     "response": "Правильно! Это вежливая форма приглашения."},
-                    {"text": "Чәй эчәсең?", "correct": False,
-                     "response": "Не совсем. Это менее формальный вариант."},
-                    {"text": "Чәй эч!", "correct": False,
-                     "response": "Нет, это слишком неформально для гостя."}
-                ],
-                "image": TEA_IMAGE
+                    {"text": "Зур рахмат!", "correct": True, "response": "Правильно! Бабушка рада, что вы вежливы."},
+                    {"text": "Рэхим итерегез!", "correct": False,
+                     "response": "Неправильно. Это значит 'Добро пожаловать!'"},
+                    {"text": "Хверле ирте!", "correct": False, "response": "Неправильно. Это значит 'Добрый день!'"},
+                    {"text": "Бик яхшы куренегез!", "correct": False,
+                     "response": "Неправильно. Это значит 'Очень приятно познакомиться!'"}
+                ]
             },
             {
-                "name": "Часть 3: Задание 2.2",
-                "type": "phrase_building",
-                "text_tatar": "",
-                "text_russian": "",
-                "explanation": "Соберите фразу из предложенных слова:",
-                "hint": "Токены: итегез · чәй · рәхим · Менә",
-                "correct_phrases": ["Менә чәй, рәхим итегез!", "Менә чәй рәхим итегез"],
-                "response": "Правильно! Вы составили вежливую фразу-приглашение.",
-                "image": TEA_IMAGE
+                "type": "ded_question",
+                "image": DED_IMAGE,
+                "text_tatar": "Бабай:\n\n— Сезгә чәй ошадымы?\n\n[Сезгэ́ чэй ошадымы́?]",
+                "text_russian": "Чай вам понравился?",
+                "hint": "Ответьте фразой: Әйе, бик тәмле чәй булды! Рәхмәт!",
+                "correct_answer": "әйе бик тәмле чәй булды рәхмәт"
             },
             {
-                "name": "Часть 4: Задание 2.3",
-                "type": "text_response",
-                "text_tatar": "",
-                "text_russian": "",
-                "explanation": "Скажите «Налейте, пожалуйста, совсем чуть-чуть.» по-татарски:",
-                "hint": "Используйте слово 'әле' (мягкое «пожалуйста») и лексику из сцены.",
-                "correct_responses": ["Әле бераз гына коегыз", "Әле бераз гына", "Әле бераз кына коегыз"],
-                "response": "Правильно! Бабушка нальет вам чуть-чуть чая.",
-                "image": TEA_IMAGE
+                "type": "tea_request",
+                "text": "Татарский чай такой вкусный, что вы бы с удовольствием выпили еще. Используя әле (мягкое «пожалуйста») и лексику из словаря попросите дедушку налить вам еще одну кружку чая",
+                "required_word": "әле"
             },
             {
-                "name": "Часть 5: Диалог с Бабаем",
-                "type": "text_response",
-                "text_tatar": "Бабай: Рәхим итегез, чәй эчегез!",
-                "text_russian": "Дедушка: Пожалуйста, пейте чай!",
-                "explanation": "Ответьте благодарностью и оцените вкус:",
-                "hint": "Скажите 'спасибо' и 'вкусно' по-татарски",
-                "correct_responses": ["Рәхмәт, бик тәмле", "Рәхмәт, бик әйбәт"],
-                "response": "Правильно! Бабай доволен вашей благодарностью.",
-                "image": TEA_IMAGE
+                "type": "ded_chak_image",
+                "image": DED_CHAK_IMAGE,
+                "text": f"Бабай:\n\n — Менә чәк-чәк. Аласызмы? \n\n [Менэ́ чэк-чэк. Аласызмы́?]\n\nВот чак-чак.{create_spoiler('Возьмёте? / Будете?')}",
+                "expected_responses": ["да", "конечно", "чак-чак"]
             },
             {
-                "name": "Часть 6: Диалог с Әби",
-                "type": "text_response",
-                "text_tatar": "Әби: Менә чәк-чәк. Аласызмы?",
-                "text_russian": "Бабушка: Вот чак-чак. Будете?",
-                "explanation": "Вежливо примите угощение:",
-                "hint": "Используйте 'менә', 'рәхим итегез' или 'белән'",
-                "correct_responses": ["Менә чәк-чәк, рәхим итегез", "Рәхим итегез, чәк-чәк белән"],
-                "response": "Правильно! Вы вежливо приняли угощение.",
-                "image": TEA_IMAGE
+                "type": "info_image",
+                "image": GRUSTNII_BABULUA_IMAGE,
+                "text": f"Әби:\n\n — Әй, самоварда су бетте... Ләкин бу бәла түгел, {create_spoiler('нам')} ярдәм итәр дип уйлыйм.\n\n "
+                        f"[Эй, самоварда́ су бетте́... Лэ-кин бу бэла́ тугель, {create_spoiler('нам')} ярдэм этэр дип уйла́ым.]\n\n Ой, вода"
+                        f"{create_spoiler(' в самоваре закончилась... Но это не беда, нам поможет, думаю.')}"
             },
             {
-                "name": "Часть 7: Просьба",
-                "type": "text_response",
-                "text_tatar": "",
-                "text_russian": "",
-                "explanation": "Попросите еще чуть-чуть чая:",
-                "hint": "Спросите 'Можно еще чуть-чуть чая?' по-татарски",
-                "correct_responses": ["Тагын бераз чәй алырга мөмкинме?", "Тагын бераз чәй мөмкинме?"],
-                "response": "Правильно! Бабушка налила вам еще чаю.",
-                "image": TEA_IMAGE
+                "type": "info_image",
+                "image": SAMOVAR_IMAGE,
+                "text": f"Проходите задания в течение дня и наполняй самовар пока бабушка печет свои пәрәмәч, чтобы к вечеру опять попить чай в теплой компании!☕️❤️"
             },
             {
-                "name": "Часть 8: Вечерние игры",
-                "type": "info",
-                "text_tatar": "Кич булды. Кояш байды. Әйдә, урамга чыгабыз. Күрше балалар белән уйныйбыз. Уйнарсыңмы?",
-                "text_russian": "Наступил вечер. Солнце село. Давай выйдем на улицу. Поиграем с соседскими детьми. Будешь играть?",
-                "explanation": "Вечерами в татарских деревнях дети часто собираются вместе для игр на улице.",
-                "next_button_text": "▶️ Продолжить",
-                "image": GAMES_IMAGE
+                "type": "info_image",
+                "image": DOBRII_IMAGE,
+                "text": "— Балам, ашадынмы? Хәзер сиңа урын җәимме? \n [Ба́лам, ашады́нгмы? Хэзе́р, синга́ уры́н жэйи́мме?] Дитя мое, ты поел ? Постель постелить ?"
             },
             {
-                "name": "Часть 9: Завершение дня",
-                "type": "info",
-                "text_tatar": "Бүген бик күңелле булды. Кич белән сау бул! Йокыгыз тәмле булсын. Килерсең әле?",
-                "text_russian": "Сегодня было очень весело. Доброй ночи! Пусть ваш сон будет сладким. Ты ещё приедешь?",
-                "explanation": "Традиционные пожелания доброй ночи и сладких снов в татарской культуре.",
-                "next_button_text": "🏁 Завершить главу",
-                "image": SLEEP_IMAGE
+                "type": "info_image",
+                "image": FINAL_IMAGE,
+                "text": f"Бабай достал из сенцев тяжелый советский матрас. Әби принесла пару пуховых подушек и тяжелое-тяжелое одеяло. На полу вам соорудили просто царское ложе. Скрип половиц, запах влаги и посапывания кота. День подходит к концу..."
             }
         ]
     }
 }
 
 
-# Функция для получения ответа от GigaChat API
+# Функция для получения ответа от GigaChat API с таймаутами
 def get_llm_response(question: str, user_answer: str) -> str:
     """
     Получает ответ от GigaChat API с проверкой ответа пользователя.
     """
-    # Получение токена
-    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Accept': 'application/json',
-        'RqUID': 'b15dc234-3503-40d5-ac09-c25453176832',
-        'Authorization': 'Basic N2NlY2E4NjMtYjFhMi00N2MxLTkwYjAtNzc3NjVmOWVkY2U5OjA3OGE1NGEzLTRlMjctNDMzMi05N2VlLWEyMWVkMzk5OTMyNQ=='
-    }
-    payload = {
-        'scope': 'GIGACHAT_API_PERS'
-    }
-
     try:
-        response_for_token = requests.post(url, headers=headers, data=payload, verify=False)
+        # Получение токена
+        url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+            'RqUID': 'b15dc234-3503-40d5-ac09-c25453176832',
+            'Authorization': 'Basic N2NlY2E4NjMtYjFhMi00N2MxLTkwYjAtNzc3NjVmOWVkY2U5OjA3OGE1NGE3LTRlMjс-NDMzMi05N2VlLWEyMWVkMzk5OT32NQ=='
+        }
+        payload = {
+            'scope': 'GIGACHAT_API_PERS'
+        }
 
-        # Проверяем, что токен получен успешно
+        response_for_token = requests.post(url, headers=headers, data=payload, verify=False, timeout=10)
+
         if response_for_token.status_code != 200:
-            return "Извините, сервис проверки ответов временно недоступен."
+            return
 
         access_token = response_for_token.json()['access_token']
 
@@ -266,7 +206,7 @@ def get_llm_response(question: str, user_answer: str) -> str:
         Если пользователь правильно ответил на вопрос - похвали пользователя.
         Если пользователь ответил не по теме - вежливо укажи на его ошибки.
         Будь доброй и поддерживающей. НЕ ОТВЕЧАЙ ПО_ТАТАРСКИ!!!
-        Отвечай сплошным текстом - не отвечай по пунктам.
+        Отвечай сплошным текстам - не отвечай по пунктам.
         Отвечай не больше двух предложений. Старайся ответь кратко и ясно
         Выводи только одну фразу!
         """
@@ -295,30 +235,15 @@ def get_llm_response(question: str, user_answer: str) -> str:
 
         resp = requests.post(url, headers=headers, json=payload, verify=False, timeout=30)
 
-        # Проверяем статус ответа
         if resp.status_code != 200:
             return "Извините, произошла ошибка при проверке ответа."
 
-        # Извлекаем ответ
         answer = resp.json()['choices'][0]['message']['content']
-
-        # Переводим ответ на татарский
-        try:
-            from gradio_client import Client
-            client = Client("https://v2.api.translate.tatar/")
-            total_answer = client.predict(
-                lang="rus2tat",
-                text=answer,
-                api_name="/translate_interface"
-            )
-            return total_answer
-        except:
-            # Если перевод не удался, возвращаем ответ на русском
-            return f"Русский вариант: {answer}\n\n(Перевод временно недоступен)"
+        return f"Русский вариант: {answer}\n\n(Перевод временно недоступен)"
 
     except Exception as e:
         logger.error(f"Ошибка при обращении к LLM: {e}")
-        return "Извините, сервис проверки ответов временно недоступен."
+        return
 
 
 # Обработчик команды /start
@@ -328,69 +253,47 @@ async def send_welcome(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_name = message.from_user.full_name
 
-    # Проверяем или создаем пользователя
-    user = await db.get_user_by_telegram_id_async(user_id)
-    if not user:
-        await db.create_user_async(user_id, user_name)
+    try:
+        user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+        if not user:
+            await asyncio.wait_for(db.create_user_async(user_id, user_name), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.error("Timeout accessing database")
+        await message.answer("Извините, произошла ошибка при доступе к базе данных. Попробуйте позже.")
+        return
+    except Exception as e:
+        logger.error(f"Ошибка при работе с базой данных: {e}")
+        await message.answer("Извините, произошла ошибка при работе с базой данных.")
+        return
 
-    # Отправляем приветственное сообщение с кнопкой "Начать"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Начать", callback_data="show_main_menu")],
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats")],
-        [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")]
-    ])
-
-    # Отправляем приветственное изображение, если оно существует
+    # Отправляем приветственное изображение
     if os.path.exists(WELCOME_IMAGE):
         try:
-            photo = FSInputFile(WELCOME_IMAGE)
-            await message.answer_photo(photo,
-                                       caption=f"Сәлам, {user_name}! Мин татар телен өйрәнү буенча ярдәмчи ботмын.\n\n"
-                                               "Давайте проведем время в татарской деревне с бабушкой и дедушкой!",
-                                       reply_markup=keyboard)
+            photo = get_cached_image(WELCOME_IMAGE)
+            if photo:
+                await message.answer_photo(
+                    photo,
+                    caption="Tатар авылы.\n\nВоздух, густой и сладкий, пахнет полынью и свежим сеном. Из распахнутого окна соседнего дома доносится сдобный аромат свежеиспечённого икмәк. Первая вечерняя молитва —азан— плывёт над деревней, смешиваясь с вечерней тишиной. Здесь время течёт по-другому…"
+                )
         except Exception as e:
             logger.error(f"Ошибка при отправке изображения: {e}")
-            await message.answer(
-                f"Сәлам, {user_name}! Мин татар телен өйрәнү буенча ярдәмчи ботмын.\n\n"
-                "Давайте проведем время в татарской деревне с бабушкой и дедушкой!",
-                reply_markup=keyboard
-            )
+            await message.answer("Tатар авылы.\n\nВоздух, густой и сладкий, пахнет полынью и свежим сеном...")
     else:
-        await message.answer(
-            f"Сәлам, {user_name}! Мин татар телен өйрәнү буенча ярдәмчи ботмын.\n\n"
-            "Давайте проведем время в татарской деревне с бабушкой и дедушкой!",
-            reply_markup=keyboard
-        )
+        await message.answer("Tатар авылы.\n\nВоздух, густой и сладкий, пахнет полынью и свежим сеном...")
 
-
-# Новый обработчик для показа главного меню
-@dp.callback_query(F.data == "show_main_menu")
-async def show_main_menu(callback: types.CallbackQuery):
-    # Создаем клавиатуру с кнопками
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Главы", callback_data="chapters_menu")],
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="my_stats")],
-        [InlineKeyboardButton(text="ℹ️ О проекте", callback_data="about")]
-    ])
-
-    await callback.message.edit_text(
-        "Выберите раздел:",
-        reply_markup=keyboard
+    # Ждем и отправляем следующие сообщения
+    await asyncio.sleep(5)
+    await message.answer(
+        "Вы наверное не совсем понимаете, где оказались)\n\n"
+        "Приветствуем вас в интерактивном курсе по татарскому языку и культуре \"Татар жае\"!☀️\n\n"
+        "На протяжении нескольких глав мы с вами будем погружаться в татарскую культуру, посмотрим быт и традиции. И прочувствуем эту загадочную татарскую душу❤️"
     )
 
-
-# Обработчик для меню глав
-@dp.callback_query(F.data == "chapters_menu")
-async def chapters_menu_callback(callback: types.CallbackQuery):
+    await asyncio.sleep(5)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Глава 1: Полное погружение", callback_data="chapter_1")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="show_main_menu")]
+        [InlineKeyboardButton(text="👵 📖 Глава 1", callback_data="chapter_1")]
     ])
-
-    await callback.message.edit_text(
-        "Выберите главу:",
-        reply_markup=keyboard
-    )
+    await message.answer("Ну что, готовы начать?", reply_markup=keyboard)
 
 
 # Обработчики для глав
@@ -401,9 +304,12 @@ async def chapter_1_callback(callback: types.CallbackQuery, state: FSMContext):
 
 # Функция запуска главы
 async def start_chapter(callback: types.CallbackQuery, state: FSMContext, chapter_key):
-    await callback.message.edit_reply_markup(reply_markup=None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except:
+        pass
+
     chapter = CHAPTERS[chapter_key]
-    await callback.message.answer(f"Начинаем {chapter['title'].lower()}! 📖")
     await state.set_state(DayScenario.waiting_for_answer)
     await state.update_data(
         current_chapter=chapter_key,
@@ -411,7 +317,8 @@ async def start_chapter(callback: types.CallbackQuery, state: FSMContext, chapte
         score=0,
         correct_answers=0,
         total_questions=0,
-        shown_images=set()  # Множество для отслеживания показанных изображений
+        shown_images=set(),
+        has_dictionary=False
     )
     await send_chapter_content(callback.message, chapter, 0, state)
 
@@ -422,66 +329,214 @@ async def send_chapter_content(message: types.Message, chapter, part_index, stat
     data = await state.get_data()
     shown_images = data.get("shown_images", set())
 
-    # Обновляем состояние с типом текущего задания
     await state.update_data(current_question_type=part.get("type", "multiple_choice"))
 
-    # Отправляем изображение, если оно указано, существует и еще не было показано
-    image_path = part.get("image")
-    if image_path and os.path.exists(image_path) and image_path not in shown_images:
-        try:
-            photo = FSInputFile(image_path)
-            await message.answer_photo(photo)
-            # Добавляем изображение в множество показанных
-            shown_images.add(image_path)
-            await state.update_data(shown_images=shown_images)
-        except Exception as e:
-            logger.error(f"Ошибка при отправке изображения: {e}")
+    # Обработка вопроса деда
+    if part.get("type") == "ded_question":
+        caption = f"{part.get('text_tatar', '')}\n\n{part.get('text_russian', '')}\n\n💡 {part.get('hint', '')}"
 
-    response = f"👵👴 {chapter['character']} - {part['name']}:\n\n"
+        # Отправляем изображение деда
+        if part.get("image") and os.path.exists(part["image"]):
+            photo = get_cached_image(part["image"])
+            if photo:
+                await message.answer_photo(photo, caption=caption)
 
-    if part["text_tatar"]:
-        response += f"🇹🇳 {part['text_tatar']}\n\n"
-    if part["text_russian"]:
-        response += f"🇷🇺 {part['text_russian']}\n\n"
-    if part["explanation"]:
-        response += f"💡 {part['explanation']}\n\n"
-
-    # Для информационного блока
-    if part["type"] == "info":
-        keyboard_buttons = []
-
-        # Добавляем кнопку "Посмотреть словарь" только для первой части
-        if part_index == 0:
-            keyboard_buttons.append(
-                [InlineKeyboardButton(text="📖 Посмотреть словарь", callback_data="show_dictionary_from_info")])
-
-        keyboard_buttons.append([InlineKeyboardButton(text=part["next_button_text"], callback_data="next_part")])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        await message.answer(response, reply_markup=keyboard)
-
-    # Для множественного выбора
-    elif part["type"] == "multiple_choice":
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=option["text"], callback_data=f"answer_{i}")]
-            for i, option in enumerate(part["options"])
-        ])
-        response += f"❓ {part['question']}"
-        await message.answer(response, reply_markup=keyboard)
-
-    # Для составления фразы или текстового ответа
-    elif part["type"] in ["phrase_building", "text_response"]:
-        if "hint" in part:
-            response += f"💡 {part['hint']}\n\n"
-        await message.answer(response)
         # Устанавливаем состояние ожидания текстового ответа
         await state.set_state(DayScenario.waiting_text_response)
-        await state.update_data(current_part=part_index)
+        await state.update_data(expected_words=part.get("expected_words", []))
+        return
+
+    # Обработка просьбы добавки чая
+    if part.get("type") == "tea_request":
+        text = part.get("text", "")
+        await message.answer(text)
+
+        # Устанавливаем состояние ожидания просьбы о чае
+        await state.set_state(DayScenario.waiting_tea_request)
+        await state.update_data(required_word=part.get("required_word", ""))
+        return
+
+    # Обработка изображения деда с чак-чаком
+    if part.get("type") == "ded_chak_image":
+        caption = part.get("text", "")
+
+        if part.get("image") and os.path.exists(part["image"]):
+            photo = get_cached_image(part["image"])
+            if photo:
+                await message.answer_photo(photo, caption=caption)
+
+        # Устанавливаем состояние ожидания ответа
+        await state.set_state(DayScenario.waiting_text_response)
+        await state.update_data(expected_responses=part.get("expected_responses", []))
+        return
+
+    # Обработка информационных изображений (грустная бабушка, самовар, доброе изображение, финальное)
+    if part.get("type") == "info_image":
+        caption = part.get("text", "")
+
+        if part.get("image") and os.path.exists(part["image"]):
+            photo = get_cached_image(part["image"])
+            if photo:
+                await message.answer_photo(photo, caption=caption)
+
+        # Если это изображение грустной бабушки, отправляем голосовое сообщение
+        if part.get("image") == DOBRII_IMAGE and os.path.exists(VOICE_MESSAGE):
+            await asyncio.sleep(2)
+            try:
+                voice = FSInputFile(VOICE_MESSAGE)
+                await message.answer_voice(voice, caption="Голосовое сообщение от бабушки")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке голосового сообщения: {e}")
+
+        # Ждем 3 секунды и переходим к следующей части
+        await asyncio.sleep(3)
+
+        # Переходим к следующей части
+        current_part = part_index + 1
+        if current_part < len(chapter["parts"]):
+            await state.update_data(current_part=current_part)
+            await send_chapter_content(message, chapter, current_part, state)
+        else:
+            await finish_chapter(message, state, chapter)
+        return
+
+    # Формируем текст для подписи
+    caption = ""
+    if part.get("text_tatar"):
+        caption += f"{part['text_tatar']}\n\n"
+    if part.get("text_russian"):
+        caption += f"{part['text_russian']}\n\n"
+
+    # Отправляем первое изображение с текстом
+    image_path = part.get("image")
+    if image_path and os.path.exists(image_path):
+        try:
+            photo = get_cached_image(image_path)
+            if photo:
+                # Отправляем фото с подписью
+                await message.answer_photo(photo, caption=caption.strip())
+
+                # Ждем 3 секунды и отправляем кнопку
+                await asyncio.sleep(3)
+                if part.get("next_button_text"):
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=part["next_button_text"], callback_data="next_part")]
+                    ])
+                    await message.answer("Нажмите кнопку, чтобы продолжить:", reply_markup=keyboard)
+
+        except Exception as e:
+            logger.error(f"Ошибка при отправке изображения: {e}")
+            if caption.strip():
+                await message.answer(caption.strip())
+    elif part.get("type") == "thanks_question":
+        # Отправляем вопрос с вариантами ответа
+        question = part.get("question", "")
+        options = part.get("options", [])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+        for idx, option in enumerate(options):
+            keyboard.inline_keyboard.append([InlineKeyboardButton(text=option["text"], callback_data=f"answer_{idx}")])
+
+        await message.answer(question, reply_markup=keyboard)
+    else:
+        if caption.strip():
+            await message.answer(caption.strip())
 
 
-# Обработчик для перехода к следующей части (для информационных блоков)
+# Обработчик для перехода к следую части
 @dp.callback_query(F.data == "next_part")
 async def next_part_callback(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    current_chapter = data.get("current_chapter")
+    current_part = data.get("current_part", 0)
+    chapter = CHAPTERS[current_chapter]
+    part = chapter["parts"][current_part]
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except:
+        pass
+
+    # Отправляем HOME_IMAGE
+    home_image_path = part.get("next_image")
+    if home_image_path and os.path.exists(home_image_path):
+        home_photo = get_cached_image(home_image_path)
+        if home_photo:
+            await callback.message.answer_photo(home_photo)
+
+    # Ждем 5 секунд и отправляем DOM_VNUTRI_IMAGE
+    await asyncio.sleep(5)
+
+    dom_image_path = part.get("next_image1")
+    if dom_image_path and os.path.exists(dom_image_path):
+        dom_photo = get_cached_image(dom_image_path)
+        if dom_photo:
+            # Формируем подпись для второго изображения
+            next_caption = ""
+            if part.get("next_text_tatar"):
+                next_caption += f"{part['next_text_tatar']}\n\n"
+            if part.get("next_text_russian"):
+                next_caption += f"{part['next_text_russian']}\n\n"
+
+            await callback.message.answer_photo(dom_photo, caption=next_caption.strip())
+
+    # Ждем 5 секунд и отправляем BABULKA_IMAGE
+    await asyncio.sleep(5)
+
+    babulka_image_path = part.get("next_image2")
+    if babulka_image_path and os.path.exists(babulka_image_path):
+        babulka_photo = get_cached_image(babulka_image_path)
+        if babulka_photo:
+            babulka_caption = part.get("next_text_babulka", "")
+            await callback.message.answer_photo(babulka_photo, caption=babulka_caption.strip())
+
+    # Ждем 5 секунд и отправляем текст
+    await asyncio.sleep(5)
+    babulka_text1 = part.get("next_text_babulka1", "")
+    if babulka_text1:
+        await callback.message.answer(babulka_text1)
+
+    # Ждем 5 секунд и отправляем SLOVARIK_IMAGE
+    await asyncio.sleep(5)
+    slovarik_image_path = part.get("next_image3")
+    if slovarik_image_path and os.path.exists(slovarik_image_path):
+        slovarik_photo = get_cached_image(slovarik_image_path)
+        if slovarik_photo:
+            await callback.message.answer_photo(slovarik_photo)
+
+    # Добавляем кнопку "Алу (взять)"
+    await asyncio.sleep(3)
+    if part.get("take_button_text"):
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=part["take_button_text"], callback_data="take_dictionary")]
+        ])
+        await callback.message.answer("Хотите взять словарик?", reply_markup=keyboard)
+
+
+# Обработчик для кнопки "Алу (взять)"
+@dp.callback_query(F.data == "take_dictionary")
+async def take_dictionary_callback(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except:
+        pass
+
+    # Обновляем состояние - пользователь получил словарь
+    await state.update_data(has_dictionary=True)
+
+    # Создаем клавиатуру с кнопкой "Словарик"
+    dictionary_keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="👵 📖 Словарик")]],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+    await callback.message.answer(
+        "Вы взяли словарик! Теперь вы можете открыть его в любое время, нажав на кнопку \"📖 Словарик\" ниже.",
+        reply_markup=dictionary_keyboard
+    )
+
+    # Переходим к следующей части
     data = await state.get_data()
     current_chapter = data.get("current_chapter")
     current_part = data.get("current_part", 0) + 1
@@ -489,147 +544,28 @@ async def next_part_callback(callback: types.CallbackQuery, state: FSMContext):
 
     if current_part < len(chapter["parts"]):
         await state.update_data(current_part=current_part)
-        await callback.message.edit_reply_markup(reply_markup=None)
         await send_chapter_content(callback.message, chapter, current_part, state)
     else:
-        await finish_chapter(callback, state, chapter)
+        await finish_chapter(callback.message, state, chapter)
 
 
-# Обработчик для показа словаря из информационного блока
-@dp.callback_query(F.data == "show_dictionary_from_info")
-async def show_dictionary_from_info(callback: types.CallbackQuery, state: FSMContext):
-    # Получаем данные о текущей части
+# Обработчик для кнопки "Словарик"
+@dp.message(F.text == "📖 Словарик")
+async def show_dictionary(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    current_chapter = data.get("current_chapter")
-    current_part = data.get("current_part", 0)
-    chapter = CHAPTERS[current_chapter]
-    part = chapter["parts"][current_part]
+    has_dictionary = data.get("has_dictionary", False)
 
-    # Собираем словарь для текущей категории
-    category = "Приветствие"  # Для первой части
-    words = FULL_DICTIONARY.get(category, {})
-
-    dictionary_text = f"📖 <b>{category}</b>\n\n"
-    dictionary_text += "\n".join([f"• <b>{key}</b> - {value}" for key, value in words.items()])
-
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        f"📚 Словарь к текущему уроку:\n\n{dictionary_text}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад к уроку", callback_data="back_to_lesson")]
-        ])
-    )
-
-
-# Обработчик для возврата из словаря к уроку
-@dp.callback_query(F.data == "back_to_lesson")
-async def back_to_lesson_callback(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    current_chapter = data.get("current_chapter")
-    current_part = data.get("current_part", 0)
-    chapter = CHAPTERS[current_chapter]
-
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await send_chapter_content(callback.message, chapter, current_part, state)
-
-
-# Обработчик текстовых ответов
-@dp.message(DayScenario.waiting_text_response)
-async def handle_text_response(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    current_chapter = data.get("current_chapter")
-    current_part = data.get("current_part", 0)
-    chapter = CHAPTERS[current_chapter]
-    part = chapter["parts"][current_part]
-    user_text = message.text.strip()
-
-    # Проверяем ответ в зависимости от типа задания
-    is_correct = False
-    feedback = ""
-
-    if part["type"] == "phrase_building":
-        # Для составления фразы проверяем несколько возможных вариантов
-        is_correct = any(phrase.lower() in user_text.lower() for phrase in part["correct_phrases"])
-        if not is_correct:
-            # Используем LLM для обратной связи
-            question = f"Составьте фразу: {part['hint']}"
-            feedback = await asyncio.to_thread(get_llm_response, question, user_text)
-
-    elif part["type"] == "text_response":
-        # Для текстового ответа проверяем несколько возможных вариантов
-        is_correct = any(resp.lower() in user_text.lower() for resp in part["correct_responses"])
-        if not is_correct:
-            # Используем LLM для обратной связи
-            question = f"Ответьте на фразу: {part.get('text_tatar', '')} - {part.get('explanation', '')}"
-            feedback = await asyncio.to_thread(get_llm_response, question, user_text)
-
-    # Обновляем статистику
-    total_questions = data.get("total_questions", 0) + 1
-    correct_answers = data.get("correct_answers", 0)
-    score = data.get("score", 0)
-
-    if is_correct:
-        score += 5
-        correct_answers += 1
-        await message.answer(f"✅ Правильно! +5 баллов\n\n{part['response']}")
-
-        # Начисляем баллы в базу данных
-        user_id = message.from_user.id
-        user = await db.get_user_by_telegram_id_async(user_id)
-        if user:
-            await db.increment_user_score_async(user[0], 5)
-    else:
-        # Показываем обратную связь от LLM
-        if feedback:
-            await message.answer(f"❌ Неправильно. Обратная связь:\n\n{feedback}")
+    if has_dictionary and os.path.exists(LIST_SLOV_IMAGE):
+        photo = get_cached_image(LIST_SLOV_IMAGE)
+        if photo:
+            await message.answer_photo(photo, caption="Вот ваш словарик! Используйте его для изучение татарских слов.")
         else:
-            await message.answer("❌ Неправильно. Попробуйте еще раз.")
-        # Не переходим к следующей части, ждем правильного ответа
-        return
-
-    await state.update_data(score=score, correct_answers=correct_answers, total_questions=total_questions)
-
-    # Переходим к следующей части
-    next_part = current_part + 1
-    if next_part < len(chapter["parts"]):
-        await state.update_data(current_part=next_part)
-        await asyncio.sleep(1)
-        await send_chapter_content(message, chapter, next_part, state)
+            await message.answer("Словарик временно недоступен.")
     else:
-        await finish_chapter(message, state, chapter)
+        await message.answer("У вас еще нет словарика. Продолжайте обучение, чтобы получить его.")
 
 
-# Функция завершения главы
-async def finish_chapter(message, state: FSMContext, chapter):
-    data = await state.get_data()
-    correct_answers = data.get("correct_answers", 0)
-    total_questions = data.get("total_questions", 0)
-    score = data.get("score", 0)
-
-    success_rate = (correct_answers / total_questions * 100) if total_questions > 0 else 0
-
-    # Получаем статистику пользователя из базы данных
-    user_id = message.from_user.id
-    user = await db.get_user_by_telegram_id_async(user_id)
-    stats = await db.get_user_stats_async(user_id) if user else None
-
-    await message.answer(
-        f"🎉 {chapter['title']} завершена!\n\n"
-        f"📊 Ваши результаты:\n"
-        f"• Правильных ответов: {correct_answers}/{total_questions}\n"
-        f"• Процент успеха: {success_rate:.1f}%\n"
-        f"• Заработано баллов: {score}\n"
-        f"• Общий счет: {stats['total_score'] if stats else 0}\n\n"
-        "Спасибо, что изучали татарский язык с нами!",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Выбрать другую главу", callback_data="chapters_menu")],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="my_stats")]
-        ])
-    )
-    await state.clear()
-
-
-# Обработчик ответа на вопрос в главе (для multiple_choice)
+# Обработчик ответа на вопрос
 @dp.callback_query(DayScenario.waiting_for_answer, F.data.startswith("answer_"))
 async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
@@ -638,10 +574,14 @@ async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
     chapter = CHAPTERS[current_chapter]
     part = chapter["parts"][current_part]
 
+    # Проверяем, что это вопрос с благодарностью
+    if part.get("type") != "thanks_question":
+        await callback.answer("Это не вопрос с вариантами ответа")
+        return
+
     option_index = int(callback.data.split("_")[1])
     option = part["options"][option_index]
 
-    # Обновляем статистику
     total_questions = data.get("total_questions", 0) + 1
     correct_answers = data.get("correct_answers", 0)
     score = data.get("score", 0)
@@ -655,85 +595,187 @@ async def handle_answer(callback: types.CallbackQuery, state: FSMContext):
 
     await state.update_data(score=score, correct_answers=correct_answers, total_questions=total_questions)
 
-    # Показываем объяснение
-    await callback.message.edit_reply_markup(reply_markup=None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except:
+        pass
+
     await callback.message.answer(f"📝 {option['response']}")
 
-    # Начисляем баллы за правильный ответ в базу данных
     if option["correct"]:
         user_id = callback.from_user.id
-        user = await db.get_user_by_telegram_id_async(user_id)
-        if user:
-            await db.increment_user_score_async(user[0], 5)
+        try:
+            user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+            if user:
+                await asyncio.wait_for(db.increment_user_score_async(user[0], 5), timeout=5.0)
+        except:
+            pass
 
-    # Переходим к следующей части
-    next_part = current_part + 1
-    if next_part < len(chapter["parts"]):
-        await state.update_data(current_part=next_part)
-        await asyncio.sleep(1)
-        await send_chapter_content(callback.message, chapter, next_part, state)
-    else:
-        await finish_chapter(callback.message, state, chapter)
-
-
-@dp.callback_query(F.data == "my_stats")
-async def my_stats_callback(callback: types.CallbackQuery):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await user_stats(callback.message)
-
-
-@dp.callback_query(F.data == "about")
-async def about_callback(callback: types.CallbackQuery):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        "🇹🇷 Татарский язык с культурой\n\n"
-        "Этот бот поможет вам изучить татарский язык через погружение в культуру и традиции.\n\n"
-        "Вы посетите виртуальную татарскую деревню, где будете общаться с местными жителями, "
-        "участвовать в повседневной жизни и изучать язык в контексте.\n\n"
-        "Проject создан для сохранения и популяризации татарского языка и культуры.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="show_main_menu")]
-        ])
-    )
-
-
-# Статистика пользователя
-@dp.message(Command("stats"))
-async def user_stats(message: types.Message):
-    user_id = message.from_user.id
-    user = await db.get_user_by_telegram_id_async(user_id)
-
-    if user:
-        stats = await db.get_user_stats_async(user_id)
-        if stats:
-            response = (f"📊 Ваша статистика:\n"
-                        f"• Общий счет: {stats['total_score']}\n"
-                        f"• Изучено фраз: {stats.get('phrases_learned', 0)}\n"
-                        f"• Правильных ответов: {stats.get('correct_answers', 0)}\n"
-                        f"• Всего вопросов: {stats.get('total_questions', 0)}\n\n"
-                        f"✅ Продолжайте в том же духе!")
-            await message.answer(response)
+        # Переходим к следующей части только при правильном ответе
+        next_part = current_part + 1
+        if next_part < len(chapter["parts"]):
+            await state.update_data(current_part=next_part)
+            await asyncio.sleep(1)
+            await send_chapter_content(callback.message, chapter, next_part, state)
         else:
-            await message.answer("Статистика не найдена. Попробуйте команду /start")
+            await finish_chapter(callback.message, state, chapter)
     else:
-        await message.answer("Вы не зарегистрированы. Используйте команду /start")
+        # При неправильном ответе остаемся на том же вопросе
+        await asyncio.sleep(1)
+        await send_chapter_content(callback.message, chapter, current_part, state)
 
 
-# Обработка текстовых сообщений с благодарностью
+# Обработчик ответа на вопрос деда
+@dp.message(DayScenario.waiting_text_response)
+async def handle_ded_response(message: types.Message, state: FSMContext):
+    user_answer = message.text.lower()
+    data = await state.get_data()
+
+    # Проверяем, это ответ на вопрос про чай или про чак-чак
+    expected_responses = data.get("expected_responses", [])
+
+    if expected_responses:  # Это вопрос про чак-чак
+        if any(response in user_answer for response in expected_responses):
+            await message.answer("✅ Отлично! Бабай рад, что вы взяли чак-чак!")
+
+            # Обновляем статистику
+            user_id = message.from_user.id
+            try:
+                user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+                if user:
+                    await asyncio.wait_for(db.increment_user_score_async(user[0], 5), timeout=5.0)
+            except:
+                pass
+
+            # Переходим к следующей части
+            current_chapter = data.get("current_chapter")
+            current_part = data.get("current_part", 0) + 1
+            chapter = CHAPTERS[current_chapter]
+
+            if current_part < len(chapter["parts"]):
+                await state.update_data(current_part=current_part)
+                await send_chapter_content(message, chapter, current_part, state)
+            else:
+                await finish_chapter(message, state, chapter)
+        else:
+            await message.answer("❌ Попробуйте ответить: 'да', 'конечно' или 'чак-чак'")
+
+    else:  # Это вопрос про чай (оригинальная логика)
+        # Нормализуем ответ пользователя: убираем знаки препинания и лишние пробелы
+        normalized_user_answer = ' '.join(user_answer.replace('!', '').replace(',', '').split())
+
+        # Получаем правильный ответ из данных состояния
+        current_chapter = data.get("current_chapter")
+        current_part = data.get("current_part", 0)
+        chapter = CHAPTERS[current_chapter]
+        part = chapter["parts"][current_part]
+        correct_answer = part.get("correct_answer", "")
+
+        # Проверяем совпадение с правильным ответом (игнорируя регистр и знаки препинания)
+        if normalized_user_answer == correct_answer:
+            # Получаем ответ от LLM
+            llm_response = get_llm_response("Понравился ли вам чай?", user_answer)
+
+            await message.answer(f"✅ Отлично! Вы правильно ответили дедушке!\n\n{llm_response}")
+
+            # Обновляем статистику
+            user_id = message.from_user.id
+            try:
+                user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+                if user:
+                    await asyncio.wait_for(db.increment_user_score_async(user[0], 10), timeout=5.0)
+            except:
+                pass
+
+            # Переходим к следующей части
+            current_part = current_part + 1
+            if current_part < len(chapter["parts"]):
+                await state.update_data(current_part=current_part)
+                await send_chapter_content(message, chapter, current_part, state)
+            else:
+                await finish_chapter(message, state, chapter)
+        else:
+            await message.answer("❌ Попробуйте еще раз. Ответ должен быть: Әйе, бик тәмле чәй булды! Рәхмәт!")
+
+
+# Обработчик просьбы добавки чая
+@dp.message(DayScenario.waiting_tea_request)
+async def handle_tea_request(message: types.Message, state: FSMContext):
+    user_answer = message.text.lower()
+    data = await state.get_data()
+
+    # Проверяем наличие обязательного слова "әле"
+    if "әле" in user_answer:
+        # Получаем ответ от LLM
+        llm_response = get_llm_response("Попросите еще чаю, используя слово 'әле'", user_answer)
+
+        await message.answer(f"✅ Отлично! Вы вежливо попросили добавки!\n\n{llm_response}")
+
+        # Обновляем статистику
+        user_id = message.from_user.id
+        try:
+            user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+            if user:
+                await asyncio.wait_for(db.increment_user_score_async(user[0], 8), timeout=5.0)
+        except:
+            pass
+
+        # Переходим к следующей части
+        current_chapter = data.get("current_chapter")
+        current_part = data.get("current_part", 0) + 1
+        chapter = CHAPTERS[current_chapter]
+
+        if current_part < len(chapter["parts"]):
+            await state.update_data(current_part=current_part)
+            await send_chapter_content(message, chapter, current_part, state)
+        else:
+            await finish_chapter(message, state, chapter)
+    else:
+        await message.answer("❌ Попробуйте еще раз. Не забудьте использовать слово 'әле' (пожалуйста) в вашей просьбе!")
+
+
+# Функция завершения главы
+async def finish_chapter(message, state: FSMContext, chapter):
+    data = await state.get_data()
+    correct_answers = data.get("correct_answers", 0)
+    total_questions = data.get("total_questions", 0)
+    score = data.get("score", 0)
+
+    success_rate = (correct_answers / total_questions * 100) if total_questions > 0 else 0
+
+    user_id = message.from_user.id
+    try:
+        user = await asyncio.wait_for(db.get_user_by_telegram_id_async(user_id), timeout=5.0)
+        stats = await asyncio.wait_for(db.get_user_stats_async(user_id), timeout=5.0) if user else None
+    except:
+        stats = None
+
+    await message.answer(
+        f"🎉 {chapter['title']} завершена!\n\n"
+        f"📊 Ваши результаты:\n"
+        f"• Правильных ответов: {correct_answers}/{total_questions}\n"
+        f"• Процент успеха: {success_rate:.1f}%\n"
+        f"• Заработано баллов: {score}\n"
+        f"• Общий счет: {stats['total_score'] if stats else 0}\n\n"
+        "Спасибо, что изучали татарский язык с нами!"
+    )
+    await state.clear()
+
+
+# Обработка текстовых сообщений
 @dp.message(F.text)
 async def handle_text(message: types.Message, state: FSMContext):
     text = message.text.lower()
     current_state = await state.get_state()
 
-    # Если пользователь в процессе сценария, предлагаем вернуться
-    if current_state == DayScenario.waiting_for_answer or current_state == DayScenario.waiting_text_response:
+    if current_state in [DayScenario.waiting_for_answer, DayScenario.waiting_text_response,
+                         DayScenario.waiting_tea_request]:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Начать заново", callback_data="show_main_menu")]
+            [InlineKeyboardButton(text="👵 🔄 Начать заново", callback_data="chapter_1")]
         ])
         await message.answer("Вы находитесь в процессе обучения. Хотите начать заново?", reply_markup=keyboard)
         return
 
-    # Ответы на благодарности
     if any(word in text for word in ['рәхмәт', 'рахмет', 'спасибо', 'thanks', 'thank']):
         responses = [
             "Зинһар! Әйбәт сүзләрегез өчен рәхмәт!",
@@ -742,20 +784,23 @@ async def handle_text(message: types.Message, state: FSMContext):
         ]
         await message.answer(random.choice(responses))
     else:
-        # Для других текстовых сообщений предлагаем начать обучение
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Начать", callback_data="show_main_menu")],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="my_stats")]
+            [InlineKeyboardButton(text="👵 📖 Глава 1", callback_data="chapter_1")]
         ])
         await message.answer(
-            "Я пока понимаю только определенные команды. Для изучения татарского языка используйте кнопки ниже:",
-            reply_markup=keyboard)
+            "Я пока понимаю только определенные команды. Для изучения татарского языка нажмите кнопку ниже:",
+            reply_markup=keyboard
+        )
 
 
 # Запуск бота
 async def main():
-    # Таблицы уже создаются автоматически при инициализации DatabaseManager
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    except TelegramNetworkError as e:
+        logger.error(f"Network error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":
